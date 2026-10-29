@@ -5,14 +5,34 @@ import java.io.BufferedOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 
-/** Minimal RouterOS API client for RouterOS 6.43+ (plain API login). */
+/** RouterOS API client for RouterOS 6.44.x and compatible versions. */
 class RouterOsApi(
     private val host: String,
     private val port: Int,
     private val user: String,
     private val password: String
 ) {
+    data class ApiResult(val rows: List<Map<String, String>>, val message: String = "")
+
     fun connectAndGetIdentity(): String {
+        val rows = execute(listOf("/system/identity/print")).rows
+        return rows.firstOrNull()?.get("name") ?: "MikroTik"
+    }
+
+    fun getSystemResource(): Map<String, String> = execute(listOf("/system/resource/print")).rows.firstOrNull() ?: emptyMap()
+    fun getHotspotActive(): List<Map<String, String>> = execute(listOf("/ip/hotspot/active/print", "=.proplist=user,address,mac-address,uptime,server,bytes-in,bytes-out")).rows
+    fun getHotspotUsers(): List<Map<String, String>> = execute(listOf("/ip/hotspot/user/print", "=.proplist=.id,name,profile,limit-uptime,disabled,comment")).rows
+
+    fun addHotspotUser(name: String, pass: String, profile: String = "default", comment: String = "Created by Shabakat Abu Ghazi"): String {
+        require(name.isNotBlank()) { "اسم المستخدم مطلوب" }
+        val words = mutableListOf("/ip/hotspot/user/add", "=name=$name", "=password=$pass")
+        if (profile.isNotBlank()) words.add("=profile=$profile")
+        if (comment.isNotBlank()) words.add("=comment=$comment")
+        execute(words)
+        return "تم إرسال أمر إنشاء الكرت إلى الراوتر."
+    }
+
+    private fun execute(command: List<String>): ApiResult {
         Socket().use { socket ->
             socket.connect(InetSocketAddress(host, port), 5000)
             socket.soTimeout = 7000
@@ -20,44 +40,45 @@ class RouterOsApi(
             val output = BufferedOutputStream(socket.getOutputStream())
 
             writeSentence(output, listOf("/login", "=name=$user", "=password=$password"))
-            val loginReply = readReply(input)
-            if (loginReply.trap != null) throw IllegalStateException("رفض تسجيل الدخول: ${loginReply.trap}")
-            if (!loginReply.done) throw IllegalStateException("لم تكتمل المصادقة مع الراوتر")
+            val login = readReply(input)
+            if (login.trap != null) throw IllegalStateException("رفض تسجيل الدخول: ${login.trap}")
+            if (!login.done) throw IllegalStateException("لم تكتمل المصادقة مع الراوتر")
 
-            writeSentence(output, listOf("/system/identity/print"))
-            val identityReply = readReply(input)
-            if (identityReply.trap != null) throw IllegalStateException("تم الاتصال لكن تعذر قراءة هوية الراوتر: ${identityReply.trap}")
-            return identityReply.attributes["name"] ?: "MikroTik"
+            writeSentence(output, command)
+            val reply = readReply(input)
+            if (reply.trap != null) throw IllegalStateException("رفض الراوتر الأمر: ${reply.trap}")
+            return ApiResult(reply.rows)
         }
     }
 
-    private data class Reply(val done: Boolean, val trap: String?, val attributes: Map<String, String>)
+    private data class Reply(val done: Boolean, val trap: String?, val rows: List<Map<String, String>>)
 
     private fun readReply(input: BufferedInputStream): Reply {
-        val attrs = linkedMapOf<String, String>()
-        var done = false
+        val rows = mutableListOf<Map<String, String>>()
         var trap: String? = null
         var sentenceCount = 0
-        while (!done && sentenceCount++ < 100) {
+        while (sentenceCount++ < 1000) {
             val words = readSentence(input)
             if (words.isEmpty()) continue
             when (words[0]) {
-                "!re" -> words.drop(1).forEach { word ->
-                    if (word.startsWith("=") && word.indexOf('=', 1) > 1) {
-                        val split = word.indexOf('=', 1)
-                        attrs[word.substring(1, split)] = word.substring(split + 1)
+                "!re" -> {
+                    val attrs = linkedMapOf<String, String>()
+                    words.drop(1).forEach { word ->
+                        if (word.startsWith("=") && word.indexOf('=', 1) > 1) {
+                            val split = word.indexOf('=', 1)
+                            attrs[word.substring(1, split)] = word.substring(split + 1)
+                        }
                     }
+                    rows.add(attrs)
                 }
-                "!trap" -> {
-                    trap = words.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=")
-                        ?: "رفض الراوتر الطلب"
-                }
-                "!done" -> done = true
+                "!trap" -> trap = words.firstOrNull { it.startsWith("=message=") }?.removePrefix("=message=") ?: "رفض الراوتر الطلب"
+                "!done" -> return Reply(true, trap, rows)
             }
-            if (trap != null) break
+            if (trap != null) {
+                // Continue reading until !done so the socket protocol remains aligned.
+            }
         }
-        if (!done && trap == null) throw IllegalStateException("انتهت مهلة انتظار رد الراوتر")
-        return Reply(done, trap, attrs)
+        throw IllegalStateException("رد طويل أو غير مكتمل من الراوتر")
     }
 
     private fun writeSentence(output: BufferedOutputStream, words: List<String>) {
@@ -90,28 +111,10 @@ class RouterOsApi(
     private fun writeLength(output: BufferedOutputStream, length: Int) {
         when {
             length < 0x80 -> output.write(length)
-            length < 0x4000 -> {
-                output.write((length shr 8) or 0x80)
-                output.write(length and 0xFF)
-            }
-            length < 0x200000 -> {
-                output.write((length shr 16) or 0xC0)
-                output.write((length shr 8) and 0xFF)
-                output.write(length and 0xFF)
-            }
-            length < 0x10000000 -> {
-                output.write((length shr 24) or 0xE0)
-                output.write((length shr 16) and 0xFF)
-                output.write((length shr 8) and 0xFF)
-                output.write(length and 0xFF)
-            }
-            else -> {
-                output.write(0xF0)
-                output.write((length shr 24) and 0xFF)
-                output.write((length shr 16) and 0xFF)
-                output.write((length shr 8) and 0xFF)
-                output.write(length and 0xFF)
-            }
+            length < 0x4000 -> { output.write((length shr 8) or 0x80); output.write(length and 0xFF) }
+            length < 0x200000 -> { output.write((length shr 16) or 0xC0); output.write((length shr 8) and 0xFF); output.write(length and 0xFF) }
+            length < 0x10000000 -> { output.write((length shr 24) or 0xE0); output.write((length shr 16) and 0xFF); output.write((length shr 8) and 0xFF); output.write(length and 0xFF) }
+            else -> { output.write(0xF0); output.write((length shr 24) and 0xFF); output.write((length shr 16) and 0xFF); output.write((length shr 8) and 0xFF); output.write(length and 0xFF) }
         }
     }
 
