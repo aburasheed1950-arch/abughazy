@@ -57,12 +57,20 @@ class MainActivity : AppCompatActivity() {
             "🖨️  طباعة الكروت وملفات PDF",
             "📊  التقارير والإحصائيات"
         )
-        cards.forEach { label ->
+        cards.forEachIndexed { index, label ->
             val b = Button(this).apply {
                 text = label
                 isAllCaps = false
                 setOnClickListener {
-                    Toast.makeText(this@MainActivity, "هذا القسم واجهة أولية وسيتم ربط وظائفه بالراوتر في مراحل التطوير التالية.", Toast.LENGTH_LONG).show()
+                    when (index) {
+                        0 -> showCreateHotspotUserDialog()
+                        1 -> loadHotspotUsers()
+                        2 -> loadHotspotUsers()
+                        3 -> loadRouterInfo()
+                        4 -> loadHotspotActive()
+                        5 -> loadHotspotUsers()
+                        6 -> loadRouterInfo()
+                    }
                 }
             }
             content.addView(b, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 4, 0, 4) })
@@ -151,6 +159,84 @@ class MainActivity : AppCompatActivity() {
                 button.isEnabled = true
             }
         }
+    }
+
+    private fun credentialsOrNull(): RouterOsApi? {
+        val host = ip.text.toString().trim()
+        val p = port.text.toString().trim().toIntOrNull()
+        val user = username.text.toString().trim()
+        val pass = password.text.toString()
+        if (host.isBlank() || p == null || p !in 1..65535 || user.isBlank()) {
+            status.text = "تحقق من عنوان IP والمنفذ واسم المستخدم."
+            return null
+        }
+        return RouterOsApi(host, p, user, pass)
+    }
+
+    private fun runApiAction(loading: String, action: (RouterOsApi) -> String) {
+        val api = credentialsOrNull() ?: return
+        status.text = loading
+        thread {
+            val result = try { action(api) } catch (e: Exception) {
+                "❌ تعذر تنفيذ العملية: ${e.message ?: e.javaClass.simpleName}"
+            }
+            runOnUiThread { status.text = result }
+        }
+    }
+
+    private fun loadRouterInfo() {
+        runApiAction("جارٍ قراءة معلومات الراوتر...") { api ->
+            val identity = api.connectAndGetIdentity()
+            val r = api.getSystemResource()
+            "✅ الراوتر: $identity\nإصدار النظام: ${r["version"] ?: "غير معروف"}\nمدة التشغيل: ${r["uptime"] ?: "غير معروفة"}\nاستخدام المعالج: ${r["cpu-load"] ?: "؟"}%\nالذاكرة الحرة: ${r["free-memory"] ?: "؟"}"
+        }
+    }
+
+    private fun loadHotspotActive() {
+        runApiAction("جارٍ جلب المشتركين المتصلين...") { api ->
+            val rows = api.getHotspotActive()
+            if (rows.isEmpty()) "لا يوجد مشتركون متصلون حاليًا." else rows.take(100).mapIndexed { i, r ->
+                "${i + 1}. ${r["user"] ?: "بدون اسم"} | IP: ${r["address"] ?: "-"} | MAC: ${r["mac-address"] ?: "-"} | مدة: ${r["uptime"] ?: "-"}"
+            }.joinToString("\n") + if (rows.size > 100) "\n... تم عرض أول 100 مشترك" else ""
+        }
+    }
+
+    private fun loadHotspotUsers() {
+        runApiAction("جارٍ جلب كروت Hotspot...") { api ->
+            val rows = api.getHotspotUsers()
+            if (rows.isEmpty()) "لم يتم العثور على كروت Hotspot." else rows.take(100).mapIndexed { i, r ->
+                "${i + 1}. ${r["name"] ?: "بدون اسم"} | الباقة: ${r["profile"] ?: "default"} | معطل: ${r["disabled"] ?: "false"} | المدة: ${r["limit-uptime"] ?: "-"}"
+            }.joinToString("\n") + if (rows.size > 100) "\n... تم عرض أول 100 كرت" else ""
+        }
+    }
+
+    private fun showCreateHotspotUserDialog() {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24) }
+        val userField = EditText(this).apply { hint = "اسم الكرت / اسم المستخدم"; maxLines = 1 }
+        val passField = EditText(this).apply { hint = "كلمة المرور (اتركها فارغة لمطابقة الاسم)"; maxLines = 1 }
+        val profileField = EditText(this).apply { hint = "اسم الباقة / Profile (default)"; setText("default"); maxLines = 1 }
+        box.addView(userField); box.addView(passField); box.addView(profileField)
+        android.app.AlertDialog.Builder(this)
+            .setTitle("إنشاء كرت Hotspot")
+            .setView(box)
+            .setNegativeButton("إلغاء", null)
+            .setPositiveButton("إنشاء على الراوتر", null)
+            .create().also { dialog ->
+                dialog.setOnShowListener {
+                    dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val u = userField.text.toString().trim()
+                        val p = passField.text.toString().ifBlank { u }
+                        val profile = profileField.text.toString().trim().ifBlank { "default" }
+                        if (u.isBlank()) { userField.error = "أدخل اسم الكرت"; return@setOnClickListener }
+                        dialog.dismiss()
+                        runApiAction("جارٍ إنشاء الكرت على المايكروتك...") { api ->
+                            api.addHotspotUser(u, p, profile)
+                            "✅ تم إنشاء الكرت $u على الراوتر ضمن الباقة $profile. افتح إدارة المشتركين للتحقق منه."
+                        }
+                    }
+                }
+                dialog.show()
+            }
     }
 
     private fun testApiPort() {
