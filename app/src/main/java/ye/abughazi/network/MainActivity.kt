@@ -80,21 +80,28 @@ class MainActivity : AppCompatActivity() {
         password.inputType = 129
         listOf(ip, port, username, password).forEach { content.addView(it) }
 
+        val connect = Button(this).apply {
+            text = "اتصال بالمايكروتك"
+            isAllCaps = false
+            setOnClickListener { connectToRouter(this) }
+        }
+        content.addView(connect)
+
         val test = Button(this).apply {
-            text = "اختبار الوصول إلى منفذ API"
+            text = "اختبار الوصول إلى منفذ API فقط"
             isAllCaps = false
             setOnClickListener { testApiPort() }
         }
         content.addView(test)
         status = TextView(this).apply {
-            text = "لم يتم اختبار الاتصال بعد"
+            text = "لم يتم الاتصال بالمايكروتك بعد"
             textSize = 16f
             setTextColor(android.graphics.Color.DKGRAY)
             setPadding(0, 12, 0, 18)
         }
         content.addView(status)
         content.addView(TextView(this).apply {
-            text = "ملاحظة: اختبار المنفذ يتحقق من إمكانية الوصول الشبكي فقط، ولا يثبت نجاح تسجيل الدخول أو تنفيذ أوامر المايكروتك."
+            text = "استخدم زر اتصال بالمايكروتك للتحقق من بيانات الدخول وقراءة اسم الراوتر. يجب تفعيل API والسماح لهذا الجهاز بالوصول. لا تفتح منفذ API للإنترنت العام."
             textSize = 13f
             setTextColor(android.graphics.Color.DKGRAY)
             setPadding(0, 8, 0, 20)
@@ -112,6 +119,37 @@ class MainActivity : AppCompatActivity() {
             maxLines = 1
             setPadding(12)
             contentDescription = label
+        }
+    }
+
+
+    private fun connectToRouter(button: Button) {
+        val host = ip.text.toString().trim()
+        val p = port.text.toString().trim().toIntOrNull()
+        val user = username.text.toString().trim()
+        val pass = password.text.toString()
+        if (host.isBlank() || p == null || p !in 1..65535 || user.isBlank()) {
+            status.text = "تحقق من عنوان IP والمنفذ واسم المستخدم."
+            return
+        }
+        button.isEnabled = false
+        status.text = "جارٍ الاتصال والتحقق من بيانات الدخول..."
+        thread {
+            val result = try {
+                val identity = RouterOsApi(host, p, user, pass).connectAndGetIdentity()
+                "✅ تم تسجيل الدخول بنجاح إلى الراوتر: $identity ($host)"
+            } catch (e: Exception) {
+                val detail = when (e) {
+                    is java.net.SocketTimeoutException -> "انتهت المهلة. تحقق من الشبكة وعنوان IP ومنفذ API."
+                    is java.net.ConnectException -> "تعذر فتح الاتصال. تحقق من تفعيل API على المنفذ $p وقواعد الجدار الناري."
+                    else -> e.message ?: "خطأ غير معروف (${e.javaClass.simpleName})"
+                }
+                "❌ فشل الاتصال: $detail"
+            }
+            runOnUiThread {
+                status.text = result
+                button.isEnabled = true
+            }
         }
     }
 
