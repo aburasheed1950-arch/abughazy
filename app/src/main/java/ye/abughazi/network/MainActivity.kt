@@ -109,7 +109,7 @@ class MainActivity : AppCompatActivity() {
             hint = label
             setText(value)
             textSize = 16f
-            singleLine = true
+            maxLines = 1
             setPadding(12)
             contentDescription = label
         }
